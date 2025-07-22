@@ -39,7 +39,7 @@ public class VideoProcessingService {
             String baseNameWithoutExt = FilenameUtils.getBaseName(r2ObjectKey);
             hlsOutputDir = ffmpegService.convertToHls(downloadedFile, baseNameWithoutExt);
 
-            log.info("HLS conversion completed with multiple quality levels: 720p, 480p, 360p");
+            log.info("HLS conversion completed with multiple quality levels");
 
             // Step 3: Upload the HLS files back to Cloudflare R2
             String hlsPrefix = FilenameUtils.getPath(r2ObjectKey) + baseNameWithoutExt + "_hls";
@@ -50,7 +50,7 @@ public class VideoProcessingService {
             // Return the master playlist key
             String masterManifestKey = hlsPrefix + "/master.m3u8";
             log.info("Video processing completed. Master HLS manifest: {}", masterManifestKey);
-            log.info("Multi-quality HLS streams available at: 720p, 480p, and 360p");
+            log.info("Multi-quality HLS streams available");
 
             return masterManifestKey;
 

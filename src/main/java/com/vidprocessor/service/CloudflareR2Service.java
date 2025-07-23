@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest; // Add this import
 import software.amazon.awssdk.services.s3.S3Configuration;
 
 import java.io.File;
@@ -123,5 +124,28 @@ public class CloudflareR2Service {
                 });
 
         log.info("Directory uploaded successfully");
+    }
+
+    /**
+     * Delete a file from Cloudflare R2
+     * @param objectKey The key of the file to delete
+     */
+    public void deleteFile(String objectKey) {
+        log.info("Deleting original video file from R2 to save storage space: {}", objectKey);
+
+        try {
+            DeleteObjectRequest deleteObjectRequest = DeleteObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(objectKey)
+                    .build();
+
+            s3Client.deleteObject(deleteObjectRequest);
+
+            log.info("Original file deleted successfully: {}", objectKey);
+        } catch (Exception e) {
+            log.error("Failed to delete original video file: {}", objectKey, e);
+            // We don't throw the exception as this is a cleanup operation
+            // that shouldn't affect the success status of the video processing
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.vidprocessor.queue;
 
 import com.vidprocessor.model.VideoProcessingStatus;
 import com.vidprocessor.service.VideoProcessingService;
+import com.vidprocessor.service.CloudflareR2Service; // Add this import
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
@@ -22,6 +23,9 @@ public class VideoProcessingQueue {
 
     @Autowired
     private VideoProcessingService videoProcessingService;
+
+    @Autowired
+    private CloudflareR2Service cloudflareR2Service; // Add this field
 
     /**
      * Add a new video processing request to the queue
@@ -63,11 +67,19 @@ public class VideoProcessingQueue {
             // Update status to COMPLETED
             updateTaskStatus(taskId, "COMPLETED", "Video conversion completed successfully", hlsManifestKey);
 
+            // After successful conversion, delete the original video file to save storage space
+            // This runs only when the HLS conversion was successful
+            cloudflareR2Service.deleteFile(r2ObjectKey);
+            log.info("Storage cleanup: Original video deleted after successful conversion to HLS: {}", r2ObjectKey);
+
             log.info("Completed processing of video: {} (Task ID: {})", r2ObjectKey, taskId);
 
         } catch (Exception e) {
             log.error("Error processing video: {} (Task ID: {})", r2ObjectKey, taskId, e);
             updateTaskStatus(taskId, "FAILED", "Error: " + e.getMessage());
+
+            // Do NOT delete the original file if processing failed
+            log.info("Keeping original video file due to processing failure: {}", r2ObjectKey);
         }
     }
 

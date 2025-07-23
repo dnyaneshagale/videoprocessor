@@ -27,6 +27,7 @@ public class VideoProcessingController {
 
     /**
      * Endpoint to submit a video for processing
+     * Supports multiple video formats including MP4, MKV, AVI, MOV, WMV, FLV, etc.
      */
     @PostMapping("/process")
     @PreAuthorize("hasRole('VIDEO_PROCESSOR')")
@@ -88,5 +89,13 @@ public class VideoProcessingController {
         log.info("User {} requested full queue status", auth.getName());
 
         return ResponseEntity.ok(processingQueue.getQueueStatus());
+    }
+
+    /**
+     * Endpoint to get information about supported video formats
+     */
+    @GetMapping("/formats")
+    public ResponseEntity<String> getSupportedFormats() {
+        return ResponseEntity.ok("Supported video formats: MP4, MKV, AVI, MOV, WMV, FLV, WebM, M4V, 3GP, TS, MTS, M2TS, MPG, MPEG, VOB, OGV, MXF, F4V, ASF, DIVX");
     }
 }

@@ -36,11 +36,12 @@ public class FFmpegService {
 
     /**
      * Converts a video file to HLS format with appropriate quality levels
-     * based on source video resolution
+     * based on source video resolution. Supports multiple input formats.
      */
     public Path convertToHls(File inputFile, String outputName) throws IOException, InterruptedException {
-        log.info("Converting video to HLS: {}", inputFile.getName());
-        log.info("Current date/time: 2025-07-22 18:58:46 UTC, User: dnyaneshagale");
+        String fileExtension = getFileExtension(inputFile.getName()).toLowerCase();
+        log.info("Converting video to HLS: {} (format: {})", inputFile.getName(), fileExtension);
+        log.info("Current date/time: 2025-07-23 07:33:43 UTC, User: dnyaneshagale");
 
         // Verify FFmpeg is installed
         if (!isFFmpegAvailable()) {
@@ -54,8 +55,8 @@ public class FFmpegService {
         try {
             // Analyze the input video to determine appropriate quality levels
             VideoMetadata metadata = analyzeVideo(inputFile);
-            log.info("Source video analysis: {}x{} pixels, duration: {} seconds",
-                    metadata.width, metadata.height, metadata.durationSeconds);
+            log.info("Source video analysis: {}x{} pixels, duration: {} seconds, codec: {}",
+                    metadata.width, metadata.height, metadata.durationSeconds, metadata.codec);
 
             // Determine which quality profiles to use based on source video
             List<String> profilesToProcess = determineQualityProfiles(metadata);
@@ -69,33 +70,34 @@ public class FFmpegService {
             // Create a master playlist that references all processed quality variants
             createMasterPlaylist(outputDir, profilesToProcess);
 
-            log.info("Adaptive HLS conversion completed for: {}", outputName);
+            log.info("Adaptive HLS conversion completed for: {} (original format: {})",
+                    outputName, fileExtension);
             log.info("Generated {} quality levels based on source resolution {}x{}",
                     profilesToProcess.size(), metadata.width, metadata.height);
 
             return outputDir;
         } catch (Exception e) {
-            log.error("FFmpeg conversion failed", e);
+            log.error("FFmpeg conversion failed for format: " + fileExtension, e);
             throw e;
         }
     }
 
     /**
      * Analyzes the input video to determine its resolution, duration, and other properties
+     * This works with any format supported by ffprobe, using a safer approach
      */
     private VideoMetadata analyzeVideo(File inputFile) throws IOException, InterruptedException {
         log.info("Analyzing video file: {}", inputFile.getName());
 
+        // Using ffprobe to get detailed JSON output which is more reliable to parse
         List<String> command = new ArrayList<>();
         command.add("ffprobe");
         command.add("-v");
-        command.add("error");
-        command.add("-select_streams");
-        command.add("v:0");
-        command.add("-show_entries");
-        command.add("stream=width,height,duration");
-        command.add("-of");
-        command.add("csv=p=0");
+        command.add("quiet");
+        command.add("-print_format");
+        command.add("json");
+        command.add("-show_format");
+        command.add("-show_streams");
         command.add(inputFile.getAbsolutePath());
 
         ProcessBuilder processBuilder = new ProcessBuilder(command);
@@ -107,7 +109,7 @@ public class FFmpegService {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                output.append(line);
+                output.append(line).append("\n");
             }
         }
 
@@ -116,21 +118,67 @@ public class FFmpegService {
             throw new IOException("Failed to analyze video: " + output);
         }
 
-        // Parse the output to get width, height, and duration
-        String[] parts = output.toString().split(",");
-        if (parts.length < 3) {
-            throw new IOException("Failed to parse video metadata: " + output);
+        String json = output.toString();
+        log.debug("FFprobe JSON output: {}", json);
+
+        // Fallback method if JSON parsing is too complex for this implementation
+        // We'll use regex to extract the information we need
+
+        int width = extractIntFromJson(json, "width\"\\s*:\\s*(\\d+)");
+        int height = extractIntFromJson(json, "height\"\\s*:\\s*(\\d+)");
+        String codec = extractStringFromJson(json, "codec_name\"\\s*:\\s*\"([^\"]+)");
+        double duration = extractDoubleFromJson(json, "duration\"\\s*:\\s*\"?([\\d\\.]+)");
+
+        if (width == 0 || height == 0) {
+            throw new IOException("Could not determine video dimensions from ffprobe output");
         }
 
-        try {
-            int width = Integer.parseInt(parts[0]);
-            int height = Integer.parseInt(parts[1]);
-            double duration = Double.parseDouble(parts[2]);
-
-            return new VideoMetadata(width, height, duration);
-        } catch (NumberFormatException e) {
-            throw new IOException("Failed to parse video dimensions: " + output, e);
+        // If codec wasn't found in the first attempt, try looking for video codec specifically
+        if (codec == null || codec.isEmpty()) {
+            codec = extractStringFromJson(json, "codec_type\"\\s*:\\s*\"video\"[^}]+codec_name\"\\s*:\\s*\"([^\"]+)");
         }
+
+        if (codec == null || codec.isEmpty()) {
+            codec = "unknown";
+        }
+
+        log.info("Extracted metadata: width={}, height={}, codec={}, duration={}", width, height, codec, duration);
+        return new VideoMetadata(width, height, duration, codec);
+    }
+
+    private int extractIntFromJson(String json, String pattern) {
+        Pattern regex = Pattern.compile(pattern);
+        Matcher matcher = regex.matcher(json);
+        if (matcher.find()) {
+            try {
+                return Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException e) {
+                log.warn("Failed to parse int: {}", matcher.group(1));
+            }
+        }
+        return 0;
+    }
+
+    private double extractDoubleFromJson(String json, String pattern) {
+        Pattern regex = Pattern.compile(pattern);
+        Matcher matcher = regex.matcher(json);
+        if (matcher.find()) {
+            try {
+                return Double.parseDouble(matcher.group(1));
+            } catch (NumberFormatException e) {
+                log.warn("Failed to parse double: {}", matcher.group(1));
+            }
+        }
+        return 0.0;
+    }
+
+    private String extractStringFromJson(String json, String pattern) {
+        Pattern regex = Pattern.compile(pattern);
+        Matcher matcher = regex.matcher(json);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return "";
     }
 
     /**
@@ -208,7 +256,7 @@ public class FFmpegService {
     }
 
     /**
-     * Creates a specific quality variant
+     * Creates a specific quality variant - this works with any input format
      */
     private void createVariant(File inputFile, Path outputDir, String profileName, QualityProfile profile) throws IOException {
         log.info("Creating {} variant ({} Kbps)", profileName, profile.videoBitrate);
@@ -217,6 +265,17 @@ public class FFmpegService {
         command.add("ffmpeg");
         command.add("-i");
         command.add(inputFile.getAbsolutePath());
+
+        // Add specific options for handling problematic formats if needed
+        String fileExtension = getFileExtension(inputFile.getName()).toLowerCase();
+        if (fileExtension.equals("mkv") || fileExtension.equals("avi") || fileExtension.equals("wmv")) {
+            // Some formats might need special handling
+            command.add("-map");
+            command.add("0:v:0"); // First video stream
+            command.add("-map");
+            command.add("0:a:0?"); // First audio stream (if exists)
+        }
+
         command.add("-c:v");
         command.add("libx264");
         command.add("-preset");
@@ -324,17 +383,34 @@ public class FFmpegService {
     }
 
     /**
+     * Extract file extension from a filename
+     */
+    private String getFileExtension(String filename) {
+        int lastDotIndex = filename.lastIndexOf('.');
+        if (lastDotIndex > 0 && lastDotIndex < filename.length() - 1) {
+            return filename.substring(lastDotIndex + 1);
+        }
+        return "";
+    }
+
+    /**
      * Value class to hold video metadata
      */
     private static class VideoMetadata {
         final int width;
         final int height;
         final double durationSeconds;
+        final String codec;
 
         VideoMetadata(int width, int height, double durationSeconds) {
+            this(width, height, durationSeconds, "unknown");
+        }
+
+        VideoMetadata(int width, int height, double durationSeconds, String codec) {
             this.width = width;
             this.height = height;
             this.durationSeconds = durationSeconds;
+            this.codec = codec;
         }
     }
 

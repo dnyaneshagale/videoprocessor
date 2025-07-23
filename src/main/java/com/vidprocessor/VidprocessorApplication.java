@@ -9,5 +9,4 @@ public class VidprocessorApplication {
 	public static void main(String[] args) {
 		SpringApplication.run(VidprocessorApplication.class, args);
 	}
-
 }

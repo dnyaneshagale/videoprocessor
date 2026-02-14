@@ -61,26 +61,64 @@ public class VideoProcessingQueue {
             // Update status to PROCESSING
             updateTaskStatus(taskId, "PROCESSING", "Video conversion in progress");
 
-            // Process the video
-            String hlsManifestKey = videoProcessingService.processVideo(r2ObjectKey);
+            // Process the video with specific error handling
+            String hlsManifestKey;
+            try {
+                hlsManifestKey = videoProcessingService.processVideo(r2ObjectKey);
+            } catch (IllegalArgumentException e) {
+                log.error("Invalid input for task {}: {}", taskId, e.getMessage());
+                updateTaskStatus(taskId, "FAILED", "Invalid file: " + e.getMessage());
+                return;
+            } catch (RuntimeException e) {
+                log.error("Processing error for task {}: {}", taskId, e.getMessage());
+                String userMessage = e.getMessage();
+                if (userMessage.contains("download")) {
+                    updateTaskStatus(taskId, "FAILED", "Download failed: " + extractErrorMessage(userMessage));
+                } else if (userMessage.contains("conversion") || userMessage.contains("FFmpeg")) {
+                    updateTaskStatus(taskId, "FAILED", "Video conversion failed: " + extractErrorMessage(userMessage));
+                } else if (userMessage.contains("upload")) {
+                    updateTaskStatus(taskId, "FAILED", "Upload failed: " + extractErrorMessage(userMessage));
+                } else {
+                    updateTaskStatus(taskId, "FAILED", "Processing failed: " + extractErrorMessage(userMessage));
+                }
+                log.info("Keeping original video file due to processing failure: {}", r2ObjectKey);
+                return;
+            }
 
             // Update status to COMPLETED
             updateTaskStatus(taskId, "COMPLETED", "Video conversion completed successfully", hlsManifestKey);
 
             // After successful conversion, delete the original video file to save storage space
-            // This runs only when the HLS conversion was successful
-            cloudflareR2Service.deleteFile(r2ObjectKey);
-            log.info("Storage cleanup: Original video deleted after successful conversion to HLS: {}", r2ObjectKey);
+            try {
+                cloudflareR2Service.deleteFile(r2ObjectKey);
+                log.info("Storage cleanup: Original video deleted after successful conversion to HLS: {}", r2ObjectKey);
+            } catch (Exception deleteEx) {
+                log.warn("Failed to delete original file after successful conversion: {}", r2ObjectKey, deleteEx);
+                // Don't fail the task if cleanup fails
+            }
 
             log.info("Completed processing of video: {} (Task ID: {})", r2ObjectKey, taskId);
 
         } catch (Exception e) {
-            log.error("Error processing video: {} (Task ID: {})", r2ObjectKey, taskId, e);
-            updateTaskStatus(taskId, "FAILED", "Error: " + e.getMessage());
-
-            // Do NOT delete the original file if processing failed
+            log.error("Unexpected error processing video: {} (Task ID: {})", r2ObjectKey, taskId, e);
+            updateTaskStatus(taskId, "FAILED", "Unexpected error: " + extractErrorMessage(e.getMessage()));
             log.info("Keeping original video file due to processing failure: {}", r2ObjectKey);
         }
+    }
+
+    /**
+     * Extract meaningful error message from exception messages
+     */
+    private String extractErrorMessage(String fullMessage) {
+        if (fullMessage == null || fullMessage.isEmpty()) {
+            return "Unknown error occurred";
+        }
+        // Extract the main error message without stack trace details
+        int colonIndex = fullMessage.indexOf(':');
+        if (colonIndex > 0 && colonIndex < fullMessage.length() - 1) {
+            return fullMessage.substring(colonIndex + 1).trim();
+        }
+        return fullMessage;
     }
 
     /**
@@ -102,6 +140,8 @@ public class VideoProcessingQueue {
             if (hlsManifestKey != null) {
                 currentStatus.setHlsManifestKey(hlsManifestKey);
             }
+        } else {
+            log.warn("Attempted to update non-existent task: {}", taskId);
         }
     }
 

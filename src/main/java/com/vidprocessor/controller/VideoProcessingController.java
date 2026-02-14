@@ -13,6 +13,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/videos")
@@ -31,9 +32,23 @@ public class VideoProcessingController {
      */
     @PostMapping("/process")
     @PreAuthorize("hasRole('VIDEO_PROCESSOR')")
-    public ResponseEntity<VideoProcessingStatus> processVideo(@RequestBody VideoProcessingRequest request) {
+    public ResponseEntity<?> processVideo(@RequestBody VideoProcessingRequest request) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null) {
+            log.error("Authentication is null in processVideo");
+            return ResponseEntity.status(401).body(Map.of("error", "Unauthorized"));
+        }
+        
         String username = auth.getName();
+
+        // Validate request body
+        if (request == null || request.getR2ObjectKey() == null || request.getR2ObjectKey().trim().isEmpty()) {
+            log.warn("Invalid request body from user: {}", username);
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "Invalid request",
+                "message", "r2ObjectKey is required and cannot be empty"
+            ));
+        }
 
         log.info("Received request to process video: {} from user: {}", request.getR2ObjectKey(), username);
 
@@ -42,7 +57,10 @@ public class VideoProcessingController {
             validationService.validateR2ObjectKey(request.getR2ObjectKey());
         } catch (IllegalArgumentException e) {
             log.warn("Validation failed for request from {}: {}", username, e.getMessage());
-            return ResponseEntity.badRequest().build();
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "Validation failed",
+                "message", e.getMessage()
+            ));
         }
 
         // Audit logging
@@ -58,24 +76,31 @@ public class VideoProcessingController {
      */
     @GetMapping("/status/{taskId}")
     @PreAuthorize("hasRole('VIDEO_PROCESSOR')")
-    public ResponseEntity<VideoProcessingStatus> getTaskStatus(@PathVariable String taskId) {
+    public ResponseEntity<?> getTaskStatus(@PathVariable String taskId) {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String username = auth != null ? auth.getName() : "unknown";
 
         // Validate taskId format
-        if (taskId == null || taskId.isEmpty() || !taskId.matches("[a-zA-Z0-9\\-]+")) {
-            log.warn("Invalid taskId format requested by user {}: {}", auth.getName(), taskId);
-            return ResponseEntity.badRequest().build();
+        if (taskId == null || taskId.trim().isEmpty() || !taskId.matches("[a-zA-Z0-9\\-]+")) {
+            log.warn("Invalid taskId format requested by user {}: {}", username, taskId);
+            return ResponseEntity.badRequest().body(Map.of(
+                "error", "Invalid taskId",
+                "message", "TaskId must contain only alphanumeric characters and hyphens"
+            ));
         }
 
         VideoProcessingStatus status = processingQueue.getTaskStatus(taskId);
         if (status != null) {
             log.info("User {} requested status for task {}: {}",
-                    auth.getName(), taskId, status.getStatus());
+                    username, taskId, status.getStatus());
             return ResponseEntity.ok(status);
         } else {
             log.info("User {} requested status for non-existent task {}",
-                    auth.getName(), taskId);
-            return ResponseEntity.notFound().build();
+                    username, taskId);
+            return ResponseEntity.status(404).body(Map.of(
+                "error", "Task not found",
+                "message", "No task found with ID: " + taskId
+            ));
         }
     }
 

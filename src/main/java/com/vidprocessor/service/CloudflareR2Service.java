@@ -13,8 +13,13 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest; // Add this import
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.http.apache.ApacheHttpClient;
+
+import java.time.Duration;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -41,26 +46,59 @@ public class CloudflareR2Service {
 
         this.bucketName = bucketName;
 
-        // Configure S3Client for Cloudflare R2
+        // Configure S3Client for Cloudflare R2 with optimized Apache HTTP Client
+        // Connection pooling for high concurrency (500 max connections)
         this.s3Client = S3Client.builder()
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(accessKey, secretKey)))
                 .endpointOverride(URI.create(endpoint))
                 .region(Region.of("auto")) // R2 requires a region, but uses "auto"
+                .httpClientBuilder(ApacheHttpClient.builder()
+                        .maxConnections(500)
+                        .connectionTimeout(Duration.ofSeconds(30))
+                        .socketTimeout(Duration.ofSeconds(60))
+                        .connectionAcquisitionTimeout(Duration.ofSeconds(10))
+                        .tcpKeepAlive(true))
                 .serviceConfiguration(S3Configuration.builder()
                         .pathStyleAccessEnabled(true) // Required for R2
                         .checksumValidationEnabled(false) // Improves compatibility
                         .build())
                 .build();
 
-        log.info("Initialized Cloudflare R2 client for bucket: {}", bucketName);
+        log.info("Initialized Cloudflare R2 client for bucket: {} with connection pool (max: 500)", bucketName);
     }
 
     /**
-     * Download a file from Cloudflare R2
+     * Check if a file exists in R2
+     */
+    public boolean fileExists(String objectKey) {
+        try {
+            HeadObjectRequest headRequest = HeadObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(objectKey)
+                    .build();
+            s3Client.headObject(headRequest);
+            return true;
+        } catch (NoSuchKeyException e) {
+            return false;
+        } catch (Exception e) {
+            log.error("Error checking file existence: {}", objectKey, e);
+            return false;
+        }
+    }
+
+    /**
+     * Downloads a file from Cloudflare R2
      */
     public File downloadFile(String objectKey) throws IOException {
         log.info("Downloading file from R2: {}", objectKey);
+
+        // Check if file exists first
+        if (!fileExists(objectKey)) {
+            throw new IllegalArgumentException(
+                "File '" + objectKey + "' does not exist in R2 bucket. Please upload the file first before processing."
+            );
+        }
 
         GetObjectRequest getObjectRequest = GetObjectRequest.builder()
                 .bucket(bucketName)
@@ -80,6 +118,11 @@ public class CloudflareR2Service {
             while ((bytesRead = s3Object.read(buffer)) != -1) {
                 outputStream.write(buffer, 0, bytesRead);
             }
+        } catch (NoSuchKeyException e) {
+            throw new IllegalArgumentException(
+                "File '" + objectKey + "' not found in R2 bucket. Please verify the file path and ensure it's uploaded.",
+                e
+            );
         }
 
         log.info("File downloaded to: {}", tempFile.getAbsolutePath());
@@ -92,14 +135,30 @@ public class CloudflareR2Service {
     public void uploadFile(File file, String objectKey) {
         log.info("Uploading file to R2: {}", objectKey);
 
-        PutObjectRequest putObjectRequest = PutObjectRequest.builder()
-                .bucket(bucketName)
-                .key(objectKey)
-                .build();
+        try {
+            if (file == null || !file.exists()) {
+                throw new IllegalArgumentException("File does not exist: " + (file != null ? file.getAbsolutePath() : "null"));
+            }
 
-        s3Client.putObject(putObjectRequest, RequestBody.fromFile(file));
+            if (!file.canRead()) {
+                throw new IOException("Cannot read file: " + file.getAbsolutePath());
+            }
 
-        log.info("File uploaded successfully: {}", objectKey);
+            PutObjectRequest putObjectRequest = PutObjectRequest.builder()
+                    .bucket(bucketName)
+                    .key(objectKey)
+                    .build();
+
+            s3Client.putObject(putObjectRequest, RequestBody.fromFile(file));
+
+            log.info("File uploaded successfully: {}", objectKey);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid file for upload: {}", objectKey, e);
+            throw e;
+        } catch (Exception e) {
+            log.error("Failed to upload file to R2: {}", objectKey, e);
+            throw new RuntimeException("Failed to upload file to R2: " + e.getMessage(), e);
+        }
     }
 
     /**
@@ -108,22 +167,46 @@ public class CloudflareR2Service {
     public void uploadDirectory(Path directory, String prefix) throws IOException {
         log.info("Uploading directory to R2: {} -> {}", directory, prefix);
 
-        Files.walk(directory)
-                .filter(Files::isRegularFile)
-                .forEach(filePath -> {
-                    String relativePath = directory.relativize(filePath).toString();
-                    String objectKey = prefix + "/" + relativePath.replace("\\", "/");
+        try {
+            if (directory == null || !Files.exists(directory)) {
+                throw new IllegalArgumentException("Directory does not exist: " + directory);
+            }
 
-                    PutObjectRequest putObjectRequest = PutObjectRequest.builder()
-                            .bucket(bucketName)
-                            .key(objectKey)
-                            .build();
+            if (!Files.isDirectory(directory)) {
+                throw new IllegalArgumentException("Path is not a directory: " + directory);
+            }
 
-                    s3Client.putObject(putObjectRequest, RequestBody.fromFile(filePath.toFile()));
-                    log.debug("Uploaded: {}", objectKey);
-                });
+            Files.walk(directory)
+                    .filter(Files::isRegularFile)
+                    .forEach(filePath -> {
+                        try {
+                            String relativePath = directory.relativize(filePath).toString();
+                            String objectKey = prefix + "/" + relativePath.replace("\\", "/");
 
-        log.info("Directory uploaded successfully");
+                            PutObjectRequest putObjectRequest = PutObjectRequest.builder()
+                                    .bucket(bucketName)
+                                    .key(objectKey)
+                                    .build();
+
+                            s3Client.putObject(putObjectRequest, RequestBody.fromFile(filePath.toFile()));
+                            log.info("Uploaded: {}", objectKey);
+                        } catch (Exception e) {
+                            log.error("Failed to upload file: {}", filePath, e);
+                            throw new RuntimeException("Failed to upload file: " + filePath + ": " + e.getMessage(), e);
+                        }
+                    });
+
+            log.info("Directory uploaded successfully: {}", prefix);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid directory for upload: {}", directory, e);
+            throw e;
+        } catch (IOException e) {
+            log.error("IO error while uploading directory: {}", directory, e);
+            throw new IOException("Failed to upload directory: " + e.getMessage(), e);
+        } catch (Exception e) {
+            log.error("Unexpected error while uploading directory: {}", directory, e);
+            throw new RuntimeException("Failed to upload directory: " + e.getMessage(), e);
+        }
     }
 
     /**

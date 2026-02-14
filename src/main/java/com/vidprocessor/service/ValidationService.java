@@ -22,9 +22,12 @@ public class ValidationService {
      * Validates R2 object keys to prevent path traversal and injection attacks
      */
     public void validateR2ObjectKey(String r2ObjectKey) {
-        if (r2ObjectKey == null || r2ObjectKey.isEmpty()) {
+        if (r2ObjectKey == null || r2ObjectKey.trim().isEmpty()) {
             throw new IllegalArgumentException("R2 object key cannot be null or empty");
         }
+
+        // Trim the key
+        r2ObjectKey = r2ObjectKey.trim();
 
         if (r2ObjectKey.contains("..")) {
             throw new IllegalArgumentException("R2 object key cannot contain path traversal sequences");
@@ -36,11 +39,16 @@ public class ValidationService {
 
         // Additional validations
         if (r2ObjectKey.length() > 1024) {
-            throw new IllegalArgumentException("R2 object key exceeds maximum length");
+            throw new IllegalArgumentException("R2 object key exceeds maximum length (1024 characters)");
         }
 
         // Check file extension is a supported video format
         String extension = getFileExtension(r2ObjectKey).toLowerCase();
+        if (extension.isEmpty()) {
+            throw new IllegalArgumentException("File must have a valid extension. Supported formats: " + 
+                    String.join(", ", SUPPORTED_VIDEO_FORMATS));
+        }
+        
         if (!SUPPORTED_VIDEO_FORMATS.contains(extension)) {
             throw new IllegalArgumentException("Unsupported video format: '" + extension +
                     "'. Supported formats: " + String.join(", ", SUPPORTED_VIDEO_FORMATS));

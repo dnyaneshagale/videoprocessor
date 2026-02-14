@@ -1,6 +1,7 @@
 package com.vidprocessor.service;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
@@ -19,6 +20,12 @@ import java.util.regex.Pattern;
 @Service
 @Slf4j
 public class FFmpegService {
+
+    @Value("${ffmpeg.path:}")
+    private String ffmpegPath;
+
+    @Value("${ffprobe.path:}")
+    private String ffprobePath;
 
     // Video quality profile definitions
     private static final Map<String, QualityProfile> QUALITY_PROFILES = new HashMap<>();
@@ -43,9 +50,22 @@ public class FFmpegService {
         log.info("Converting video to HLS: {} (format: {})", inputFile.getName(), fileExtension);
         log.info("Current date/time: 2025-07-23 07:33:43 UTC, User: dnyaneshagale");
 
+        // Validate input file
+        if (inputFile == null || !inputFile.exists()) {
+            throw new IllegalArgumentException("Input file does not exist: " + (inputFile != null ? inputFile.getAbsolutePath() : "null"));
+        }
+
+        if (!inputFile.canRead()) {
+            throw new IOException("Cannot read input file: " + inputFile.getAbsolutePath());
+        }
+
+        if (inputFile.length() == 0) {
+            throw new IOException("Input file is empty: " + inputFile.getAbsolutePath());
+        }
+
         // Verify FFmpeg is installed
         if (!isFFmpegAvailable()) {
-            throw new IOException("FFmpeg is not available. Please install FFmpeg and make sure it's on the PATH.");
+            throw new IOException(buildFFmpegNotFoundError());
         }
 
         // Create a temporary directory for the output
@@ -76,9 +96,44 @@ public class FFmpegService {
                     profilesToProcess.size(), metadata.width, metadata.height);
 
             return outputDir;
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid input for FFmpeg conversion: {}", e.getMessage());
+            cleanupOutputDir(outputDir);
+            throw new IOException("Invalid input file: " + e.getMessage(), e);
+        } catch (IOException e) {
+            log.error("IO error during FFmpeg conversion for format: {}", fileExtension, e);
+            cleanupOutputDir(outputDir);
+            throw new IOException("HLS conversion failed (IO error): " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            log.error("FFmpeg conversion interrupted for format: {}", fileExtension, e);
+            cleanupOutputDir(outputDir);
+            Thread.currentThread().interrupt();
+            throw new InterruptedException("HLS conversion interrupted: " + e.getMessage());
         } catch (Exception e) {
-            log.error("FFmpeg conversion failed for format: " + fileExtension, e);
-            throw e;
+            log.error("Unexpected error during FFmpeg conversion for format: {}", fileExtension, e);
+            cleanupOutputDir(outputDir);
+            throw new IOException("HLS conversion failed (unexpected error): " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Clean up output directory on error
+     */
+    private void cleanupOutputDir(Path outputDir) {
+        if (outputDir != null && Files.exists(outputDir)) {
+            try {
+                Files.walk(outputDir)
+                        .sorted((a, b) -> b.compareTo(a)) // Delete files before directories
+                        .forEach(path -> {
+                            try {
+                                Files.delete(path);
+                            } catch (IOException ex) {
+                                log.warn("Failed to delete: {}", path, ex);
+                            }
+                        });
+            } catch (IOException cleanupEx) {
+                log.warn("Failed to clean up output directory: {}", outputDir, cleanupEx);
+            }
         }
     }
 
@@ -89,61 +144,84 @@ public class FFmpegService {
     private VideoMetadata analyzeVideo(File inputFile) throws IOException, InterruptedException {
         log.info("Analyzing video file: {}", inputFile.getName());
 
-        // Using ffprobe to get detailed JSON output which is more reliable to parse
-        List<String> command = new ArrayList<>();
-        command.add("ffprobe");
-        command.add("-v");
-        command.add("quiet");
-        command.add("-print_format");
-        command.add("json");
-        command.add("-show_format");
-        command.add("-show_streams");
-        command.add(inputFile.getAbsolutePath());
-
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.redirectErrorStream(true);
-
-        Process process = processBuilder.start();
-        StringBuilder output = new StringBuilder();
-
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+        try {
+            if (inputFile == null || !inputFile.exists()) {
+                throw new IllegalArgumentException("Input file does not exist for analysis");
             }
+
+            // Using ffprobe to get detailed JSON output which is more reliable to parse
+            List<String> command = new ArrayList<>();
+            command.add(getFFprobeExecutable());
+            command.add("-v");
+            command.add("quiet");
+            command.add("-print_format");
+            command.add("json");
+            command.add("-show_format");
+            command.add("-show_streams");
+            command.add(inputFile.getAbsolutePath());
+
+            ProcessBuilder processBuilder = new ProcessBuilder(command);
+            processBuilder.redirectErrorStream(true);
+
+            Process process = processBuilder.start();
+            StringBuilder output = new StringBuilder();
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            } catch (IOException e) {
+                log.error("Error reading ffprobe output", e);
+                throw new IOException("Failed to read video analysis output: " + e.getMessage(), e);
+            }
+
+            int exitCode = process.waitFor();
+            if (exitCode != 0) {
+                throw new IOException("FFprobe failed to analyze video (exit code " + exitCode + "): " + output);
+            }
+
+            String json = output.toString();
+            log.debug("FFprobe JSON output: {}", json);
+
+            if (json.isEmpty()) {
+                throw new IOException("FFprobe returned empty output");
+            }
+
+            // Fallback method if JSON parsing is too complex for this implementation
+            // We'll use regex to extract the information we need
+
+            int width = extractIntFromJson(json, "width\"\\s*:\\s*(\\d+)");
+            int height = extractIntFromJson(json, "height\"\\s*:\\s*(\\d+)");
+            String codec = extractStringFromJson(json, "codec_name\"\\s*:\\s*\"([^\"]+)");
+            double duration = extractDoubleFromJson(json, "duration\"\\s*:\\s*\"?([\\d\\.]+)");
+
+            if (width == 0 || height == 0) {
+                throw new IOException("Could not determine video dimensions from ffprobe output. The file may be corrupted or not a valid video.");
+            }
+
+            // If codec wasn't found in the first attempt, try looking for video codec specifically
+            if (codec == null || codec.isEmpty()) {
+                codec = extractStringFromJson(json, "codec_type\"\\s*:\\s*\"video\"[^}]+codec_name\"\\s*:\\s*\"([^\"]+)");
+            }
+
+            if (codec == null || codec.isEmpty()) {
+                codec = "unknown";
+            }
+
+            log.info("Extracted metadata: width={}, height={}, codec={}, duration={}", width, height, codec, duration);
+            return new VideoMetadata(width, height, duration, codec);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid input file for analysis", e);
+            throw new IOException("Video analysis failed: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            log.error("Video analysis interrupted", e);
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (Exception e) {
+            log.error("Unexpected error during video analysis", e);
+            throw new IOException("Video analysis failed: " + e.getMessage(), e);
         }
-
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            throw new IOException("Failed to analyze video: " + output);
-        }
-
-        String json = output.toString();
-        log.debug("FFprobe JSON output: {}", json);
-
-        // Fallback method if JSON parsing is too complex for this implementation
-        // We'll use regex to extract the information we need
-
-        int width = extractIntFromJson(json, "width\"\\s*:\\s*(\\d+)");
-        int height = extractIntFromJson(json, "height\"\\s*:\\s*(\\d+)");
-        String codec = extractStringFromJson(json, "codec_name\"\\s*:\\s*\"([^\"]+)");
-        double duration = extractDoubleFromJson(json, "duration\"\\s*:\\s*\"?([\\d\\.]+)");
-
-        if (width == 0 || height == 0) {
-            throw new IOException("Could not determine video dimensions from ffprobe output");
-        }
-
-        // If codec wasn't found in the first attempt, try looking for video codec specifically
-        if (codec == null || codec.isEmpty()) {
-            codec = extractStringFromJson(json, "codec_type\"\\s*:\\s*\"video\"[^}]+codec_name\"\\s*:\\s*\"([^\"]+)");
-        }
-
-        if (codec == null || codec.isEmpty()) {
-            codec = "unknown";
-        }
-
-        log.info("Extracted metadata: width={}, height={}, codec={}, duration={}", width, height, codec, duration);
-        return new VideoMetadata(width, height, duration, codec);
     }
 
     private int extractIntFromJson(String json, String pattern) {
@@ -187,69 +265,33 @@ public class FFmpegService {
     private List<String> determineQualityProfiles(VideoMetadata metadata) {
         List<String> profiles = new ArrayList<>();
 
-        // Logic to select appropriate profiles based on source resolution
+        // Optimized for speed: Only 3 quality levels (High/Medium/Low)
         if (metadata.height >= 1440) {
-            // Source is 1440p or higher - use all profiles
             profiles.add("1440p");
-            profiles.add("1080p");
             profiles.add("720p");
-            profiles.add("480p");
             profiles.add("360p");
-            profiles.add("240p");
-            profiles.add("144p");
         }
         else if (metadata.height >= 1080) {
-            // Source is 1080p - don't upscale to 1440p
             profiles.add("1080p");
-            profiles.add("720p");
             profiles.add("480p");
-            profiles.add("360p");
             profiles.add("240p");
-            profiles.add("144p");
         }
         else if (metadata.height >= 720) {
-            // Source is 720p
             profiles.add("720p");
-            profiles.add("480p");
             profiles.add("360p");
-            profiles.add("240p");
             profiles.add("144p");
         }
         else if (metadata.height >= 480) {
-            // Source is 480p
             profiles.add("480p");
-            profiles.add("360p");
             profiles.add("240p");
             profiles.add("144p");
         }
         else if (metadata.height >= 360) {
-            // Source is 360p
             profiles.add("360p");
-            profiles.add("240p");
-            profiles.add("144p");
-        }
-        else if (metadata.height >= 240) {
-            // Source is 240p
-            profiles.add("240p");
             profiles.add("144p");
         }
         else {
-            // Source is very low resolution
-            profiles.add("144p");
-        }
-
-        // For very short videos, reduce the number of profiles to save processing time
-        if (metadata.durationSeconds < 60) { // Less than 1 minute
-            // Keep only every other profile for short videos
-            List<String> reducedProfiles = new ArrayList<>();
-            for (int i = 0; i < profiles.size(); i++) {
-                reducedProfiles.add(profiles.get(i));
-            }
-            // Always ensure we have at least the lowest quality
-            if (!reducedProfiles.contains("144p")) {
-                reducedProfiles.add("144p");
-            }
-            return reducedProfiles;
+            profiles.add("240p");
         }
 
         return profiles;
@@ -262,7 +304,7 @@ public class FFmpegService {
         log.info("Creating {} variant ({} Kbps)", profileName, profile.videoBitrate);
 
         List<String> command = new ArrayList<>();
-        command.add("ffmpeg");
+        command.add(getFFmpegExecutable());
         command.add("-i");
         command.add(inputFile.getAbsolutePath());
 
@@ -279,7 +321,7 @@ public class FFmpegService {
         command.add("-c:v");
         command.add("libx264");
         command.add("-preset");
-        command.add("medium");
+        command.add("ultrafast");
         command.add("-vf");
         command.add(String.format("scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2",
                 profile.width, profile.height, profile.width, profile.height));
@@ -332,14 +374,89 @@ public class FFmpegService {
      */
     private boolean isFFmpegAvailable() {
         try {
-            ProcessBuilder processBuilder = new ProcessBuilder("ffmpeg", "-version");
+            ProcessBuilder processBuilder = new ProcessBuilder(getFFmpegExecutable(), "-version");
+            processBuilder.redirectErrorStream(true);
             Process process = processBuilder.start();
             int exitCode = process.waitFor();
             return exitCode == 0;
+        } catch (IOException e) {
+            log.error("FFmpeg not found: {}", e.getMessage());
+            return false;
         } catch (Exception e) {
             log.error("Error checking FFmpeg availability", e);
             return false;
         }
+    }
+
+    /**
+     * Get the FFmpeg executable path (configured or from PATH)
+     */
+    private String getFFmpegExecutable() {
+        if (ffmpegPath != null && !ffmpegPath.trim().isEmpty()) {
+            return ffmpegPath.trim();
+        }
+        return "ffmpeg"; // Fall back to system PATH
+    }
+
+    /**
+     * Get the FFprobe executable path (configured or from PATH)
+     */
+    private String getFFprobeExecutable() {
+        if (ffprobePath != null && !ffprobePath.trim().isEmpty()) {
+            return ffprobePath.trim();
+        }
+        return "ffprobe"; // Fall back to system PATH
+    }
+
+    /**
+     * Build comprehensive error message when FFmpeg is not found
+     */
+    private String buildFFmpegNotFoundError() {
+        String os = System.getProperty("os.name").toLowerCase();
+        StringBuilder error = new StringBuilder();
+        error.append("\n\n");
+        error.append("═══════════════════════════════════════════════════════════════\n");
+        error.append("  ❌ FFMPEG NOT FOUND\n");
+        error.append("═══════════════════════════════════════════════════════════════\n\n");
+        
+        if (os.contains("win")) {
+            error.append("🪟 WINDOWS INSTALLATION:\n\n");
+            error.append("1. Download FFmpeg:\n");
+            error.append("   https://www.gyan.dev/ffmpeg/builds/\n");
+            error.append("   Get: ffmpeg-release-essentials.zip\n\n");
+            error.append("2. Extract to: C:\\ffmpeg\\\n");
+            error.append("   Verify: C:\\ffmpeg\\bin\\ffmpeg.exe exists\n\n");
+            error.append("3. Add to System PATH:\n");
+            error.append("   - Right-click 'This PC' → Properties\n");
+            error.append("   - Advanced system settings → Environment Variables\n");
+            error.append("   - Edit 'Path' → New → Add: C:\\ffmpeg\\bin\n");
+            error.append("   - Restart terminal and IDE\n\n");
+            error.append("4. Verify: Run 'ffmpeg -version' in CMD\n\n");
+            error.append("📝 ALTERNATIVE (Production):\n");
+            error.append("   Configure in application.properties:\n");
+            error.append("   ffmpeg.path=C:/ffmpeg/bin/ffmpeg.exe\n");
+            error.append("   ffprobe.path=C:/ffmpeg/bin/ffprobe.exe\n");
+        } else if (os.contains("nix") || os.contains("nux") || os.contains("mac")) {
+            error.append("🐧 LINUX/MAC INSTALLATION:\n\n");
+            error.append("Ubuntu/Debian:\n");
+            error.append("  sudo apt update\n");
+            error.append("  sudo apt install ffmpeg\n\n");
+            error.append("CentOS/RHEL:\n");
+            error.append("  sudo yum install ffmpeg\n\n");
+            error.append("MacOS:\n");
+            error.append("  brew install ffmpeg\n\n");
+            error.append("Verify: ffmpeg -version\n\n");
+            error.append("📝 For Docker:\n");
+            error.append("   Add to Dockerfile:\n");
+            error.append("   RUN apt-get update && apt-get install -y ffmpeg\n");
+        }
+        
+        error.append("\n═══════════════════════════════════════════════════════════════\n");
+        error.append("Current FFmpeg config: ");
+        error.append(ffmpegPath != null && !ffmpegPath.trim().isEmpty() ? ffmpegPath : "Using system PATH");
+        error.append("\n═══════════════════════════════════════════════════════════════\n");
+        
+        return error.toString();
     }
 
     /**

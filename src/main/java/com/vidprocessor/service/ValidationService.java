@@ -1,5 +1,6 @@
 package com.vidprocessor.service;
 
+import org.apache.commons.io.FilenameUtils;
 import org.springframework.stereotype.Service;
 import java.util.regex.Pattern;
 import java.util.Arrays;
@@ -43,7 +44,7 @@ public class ValidationService {
         }
 
         // Check file extension is a supported video format
-        String extension = getFileExtension(r2ObjectKey).toLowerCase();
+        String extension = FilenameUtils.getExtension(r2ObjectKey).toLowerCase();
         if (extension.isEmpty()) {
             throw new IllegalArgumentException("File must have a valid extension. Supported formats: " + 
                     String.join(", ", SUPPORTED_VIDEO_FORMATS));
@@ -55,14 +56,4 @@ public class ValidationService {
         }
     }
 
-    /**
-     * Extract file extension from a filename
-     */
-    private String getFileExtension(String filename) {
-        int lastDotIndex = filename.lastIndexOf('.');
-        if (lastDotIndex > 0 && lastDotIndex < filename.length() - 1) {
-            return filename.substring(lastDotIndex + 1);
-        }
-        return "";
-    }
 }

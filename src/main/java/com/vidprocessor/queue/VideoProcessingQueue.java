@@ -2,9 +2,11 @@ package com.vidprocessor.queue;
 
 import com.vidprocessor.model.VideoProcessingStatus;
 import com.vidprocessor.service.VideoProcessingService;
-import com.vidprocessor.service.CloudflareR2Service; // Add this import
+import com.vidprocessor.service.CloudflareR2Service;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 @Slf4j
@@ -21,31 +24,66 @@ public class VideoProcessingQueue {
 
     private final ConcurrentMap<String, VideoProcessingStatus> taskStatusMap = new ConcurrentHashMap<>();
 
+    /** Tracks how many tasks are actively being processed right now. */
+    private final AtomicInteger activeProcessingCount = new AtomicInteger(0);
+
+    /** Max concurrent processing slots (auto-detected from CPU cores, overridable). */
+    private final int maxConcurrentSlots;
+
     @Autowired
     private VideoProcessingService videoProcessingService;
 
     @Autowired
-    private CloudflareR2Service cloudflareR2Service; // Add this field
+    private CloudflareR2Service cloudflareR2Service;
+
+    @Autowired
+    @Lazy
+    private VideoProcessingQueue self;
+
+    public VideoProcessingQueue(
+            @Value("${video.processing.max-concurrent-tasks:0}") int configuredMax) {
+        int cores = Runtime.getRuntime().availableProcessors();
+        this.maxConcurrentSlots = configuredMax > 0 ? configuredMax : cores;
+        log.info("VideoProcessingQueue initialised: maxConcurrentSlots={} (CPU cores={})", maxConcurrentSlots, cores);
+    }
 
     /**
-     * Add a new video processing request to the queue
+     * Add a new video processing request to the queue.
+     * If processing slots are available, position = 0 (starts immediately).
+     * Otherwise, position = how many tasks are waiting ahead + 1.
      */
-    public VideoProcessingStatus enqueue(String r2ObjectKey) {
+    public synchronized VideoProcessingStatus enqueue(String r2ObjectKey) {
         String taskId = UUID.randomUUID().toString();
 
         VideoProcessingStatus status = new VideoProcessingStatus();
         status.setId(taskId);
         status.setR2ObjectKey(r2ObjectKey);
         status.setStatus("QUEUED");
-        status.setMessage("Task queued for processing");
         status.setCreatedAt(LocalDateTime.now());
         status.setUpdatedAt(LocalDateTime.now());
 
-        taskStatusMap.put(taskId, status);
-        log.info("Added video to queue: {} with task ID: {}", r2ObjectKey, taskId);
+        // Calculate real queue position
+        int currentActive = activeProcessingCount.get();
+        if (currentActive < maxConcurrentSlots) {
+            // A processing slot is available — this task will start immediately
+            status.setQueuePosition(0);
+            status.setMessage("Task queued — processing slot available, starting immediately");
+        } else {
+            // All slots occupied — calculate waiting position
+            long waitingAhead = taskStatusMap.values().stream()
+                    .filter(s -> "QUEUED".equals(s.getStatus()) && s.getQueuePosition() > 0)
+                    .count();
+            int position = (int) waitingAhead + 1;
+            status.setQueuePosition(position);
+            status.setMessage("Task queued — position " + position + " in waiting queue (" + maxConcurrentSlots + " slots busy)");
+        }
 
-        // Start async processing immediately
-        processVideoAsync(taskId, r2ObjectKey);
+        taskStatusMap.put(taskId, status);
+        log.info("Enqueued video: {} | taskId={} | queuePosition={} | activeSlots={}/{}",
+                r2ObjectKey, taskId, status.getQueuePosition(), currentActive, maxConcurrentSlots);
+
+        // Start async processing (call via proxy so @Async is honoured)
+        self.processVideoAsync(taskId, r2ObjectKey);
 
         return status;
     }
@@ -54,12 +92,16 @@ public class VideoProcessingQueue {
      * Process a video asynchronously
      */
     @Async("videoProcessingExecutor")
-    protected void processVideoAsync(String taskId, String r2ObjectKey) {
+    public void processVideoAsync(String taskId, String r2ObjectKey) {
+        int currentActive = activeProcessingCount.incrementAndGet();
+        log.info("Processing slot acquired for task {} — active: {}/{}", taskId, currentActive, maxConcurrentSlots);
+
         try {
             log.info("Starting async processing of video: {} (Task ID: {})", r2ObjectKey, taskId);
 
-            // Update status to PROCESSING
+            // Update status to PROCESSING and recalculate waiting positions
             updateTaskStatus(taskId, "PROCESSING", "Video conversion in progress");
+            recalculateQueuePositions();
 
             // Process the video with specific error handling
             String hlsManifestKey;
@@ -71,7 +113,7 @@ public class VideoProcessingQueue {
                 return;
             } catch (RuntimeException e) {
                 log.error("Processing error for task {}: {}", taskId, e.getMessage());
-                String userMessage = e.getMessage();
+                String userMessage = e.getMessage() != null ? e.getMessage() : "Unknown error";
                 if (userMessage.contains("download")) {
                     updateTaskStatus(taskId, "FAILED", "Download failed: " + extractErrorMessage(userMessage));
                 } else if (userMessage.contains("conversion") || userMessage.contains("FFmpeg")) {
@@ -94,7 +136,6 @@ public class VideoProcessingQueue {
                 log.info("Storage cleanup: Original video deleted after successful conversion to HLS: {}", r2ObjectKey);
             } catch (Exception deleteEx) {
                 log.warn("Failed to delete original file after successful conversion: {}", r2ObjectKey, deleteEx);
-                // Don't fail the task if cleanup fails
             }
 
             log.info("Completed processing of video: {} (Task ID: {})", r2ObjectKey, taskId);
@@ -103,6 +144,10 @@ public class VideoProcessingQueue {
             log.error("Unexpected error processing video: {} (Task ID: {})", r2ObjectKey, taskId, e);
             updateTaskStatus(taskId, "FAILED", "Unexpected error: " + extractErrorMessage(e.getMessage()));
             log.info("Keeping original video file due to processing failure: {}", r2ObjectKey);
+        } finally {
+            int remaining = activeProcessingCount.decrementAndGet();
+            log.info("Processing slot released for task {} — active: {}/{}", taskId, remaining, maxConcurrentSlots);
+            recalculateQueuePositions();
         }
     }
 
@@ -113,7 +158,6 @@ public class VideoProcessingQueue {
         if (fullMessage == null || fullMessage.isEmpty()) {
             return "Unknown error occurred";
         }
-        // Extract the main error message without stack trace details
         int colonIndex = fullMessage.indexOf(':');
         if (colonIndex > 0 && colonIndex < fullMessage.length() - 1) {
             return fullMessage.substring(colonIndex + 1).trim();
@@ -146,6 +190,37 @@ public class VideoProcessingQueue {
     }
 
     /**
+     * Recalculate queue positions for all QUEUED tasks.
+     * - PROCESSING / COMPLETED / FAILED → position 0
+     * - QUEUED tasks are ordered by createdAt and numbered starting from 1
+     *   only if all processing slots are occupied; otherwise they get position 0
+     *   (meaning they'll be picked up as soon as a thread is available).
+     */
+    private synchronized void recalculateQueuePositions() {
+        int currentActive = activeProcessingCount.get();
+
+        List<VideoProcessingStatus> queuedTasks = taskStatusMap.values().stream()
+                .filter(s -> "QUEUED".equals(s.getStatus()))
+                .sorted((a, b) -> a.getCreatedAt().compareTo(b.getCreatedAt()))
+                .toList();
+
+        int pos = 1;
+        for (VideoProcessingStatus task : queuedTasks) {
+            if (currentActive < maxConcurrentSlots) {
+                // Slots still available — these will start soon
+                task.setQueuePosition(0);
+            } else {
+                task.setQueuePosition(pos++);
+            }
+        }
+
+        // Zero out position for non-queued tasks
+        taskStatusMap.values().stream()
+                .filter(s -> !"QUEUED".equals(s.getStatus()))
+                .forEach(s -> s.setQueuePosition(0));
+    }
+
+    /**
      * Get a list of all tasks in the queue
      */
     public List<VideoProcessingStatus> getQueueStatus() {
@@ -157,5 +232,15 @@ public class VideoProcessingQueue {
      */
     public VideoProcessingStatus getTaskStatus(String taskId) {
         return taskStatusMap.get(taskId);
+    }
+
+    /**
+     * Get status of a task by its R2 object key
+     */
+    public VideoProcessingStatus getTaskStatusByR2Key(String r2ObjectKey) {
+        return taskStatusMap.values().stream()
+                .filter(s -> r2ObjectKey.equals(s.getR2ObjectKey()))
+                .findFirst()
+                .orElse(null);
     }
 }

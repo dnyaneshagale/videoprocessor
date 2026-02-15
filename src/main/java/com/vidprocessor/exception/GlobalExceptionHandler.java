@@ -3,7 +3,6 @@ package com.vidprocessor.exception;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
@@ -30,18 +29,6 @@ public class GlobalExceptionHandler {
                 HttpStatus.BAD_REQUEST,
                 "Validation Error",
                 ex.getMessage(),
-                request.getDescription(false)
-        );
-    }
-
-    @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<Map<String, Object>> handleAccessDeniedException(
-            AccessDeniedException ex, WebRequest request) {
-        log.warn("Access denied: {}", ex.getMessage());
-        return buildErrorResponse(
-                HttpStatus.FORBIDDEN,
-                "Access Denied",
-                "You don't have permission to access this resource",
                 request.getDescription(false)
         );
     }
@@ -86,13 +73,10 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleS3Exception(
             S3Exception ex, WebRequest request) {
         log.error("R2 storage error: {}", ex.getMessage(), ex);
-        String errorMsg = ex.awsErrorDetails() != null 
-            ? ex.awsErrorDetails().errorMessage() 
-            : ex.getMessage();
         return buildErrorResponse(
                 HttpStatus.BAD_GATEWAY,
                 "Storage Service Error",
-                "R2 storage error: " + errorMsg,
+                "A storage service error occurred. Please try again later.",
                 request.getDescription(false)
         );
     }

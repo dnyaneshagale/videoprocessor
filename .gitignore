@@ -31,4 +31,12 @@ build/
 
 ### VS Code ###
 .vscode/
-/src/main/resources/application.properties.
+
+### Secrets & environment ###
+.env
+*.env
+!.env.example
+
+### Old files ###
+IMP FILE.txt
+VideoProcessor.png

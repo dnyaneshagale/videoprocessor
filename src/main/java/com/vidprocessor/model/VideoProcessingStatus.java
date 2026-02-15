@@ -15,6 +15,7 @@ public class VideoProcessingStatus {
     private String status; // QUEUED, PROCESSING, COMPLETED, FAILED
     private String message;
     private String hlsManifestKey; // The key of the master HLS manifest file
+    private int queuePosition; // Position in the processing queue (0 = not queued / completed / failed)
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+*.jar
+*.war
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+
+# Git
+.git/
+.gitignore
+
+# Environment & secrets
+.env
+*.env
+!.env.example
+
+# Documentation
+README.md
+*.md
+*.txt
+*.png
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Maven wrapper (re-downloaded in build stage)
+.mvn/
+mvnw
+mvnw.cmd

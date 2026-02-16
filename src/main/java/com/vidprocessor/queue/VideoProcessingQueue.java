@@ -3,6 +3,7 @@ package com.vidprocessor.queue;
 import com.vidprocessor.model.VideoProcessingStatus;
 import com.vidprocessor.service.VideoProcessingService;
 import com.vidprocessor.service.CloudflareR2Service;
+import com.vidprocessor.service.FirebaseService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,6 +36,9 @@ public class VideoProcessingQueue {
 
     @Autowired
     private CloudflareR2Service cloudflareR2Service;
+
+    @Autowired
+    private FirebaseService firebaseService;
 
     @Autowired
     @Lazy
@@ -103,6 +107,9 @@ public class VideoProcessingQueue {
             updateTaskStatus(taskId, "PROCESSING", "Video conversion in progress");
             recalculateQueuePositions();
 
+            // Track conversion start time
+            long conversionStartTime = System.currentTimeMillis();
+
             // Process the video with specific error handling
             String hlsManifestKey;
             try {
@@ -127,16 +134,14 @@ public class VideoProcessingQueue {
                 return;
             }
 
-            // Update status to COMPLETED
-            updateTaskStatus(taskId, "COMPLETED", "Video conversion completed successfully", hlsManifestKey);
+            // Calculate conversion time in seconds
+            long conversionTimeSec = (System.currentTimeMillis() - conversionStartTime) / 1000;
 
-            // After successful conversion, delete the original video file to save storage space
-            try {
-                cloudflareR2Service.deleteFile(r2ObjectKey);
-                log.info("Storage cleanup: Original video deleted after successful conversion to HLS: {}", r2ObjectKey);
-            } catch (Exception deleteEx) {
-                log.warn("Failed to delete original file after successful conversion: {}", r2ObjectKey, deleteEx);
-            }
+            // Update status to COMPLETED
+            updateTaskStatus(taskId, "COMPLETED", "Video conversion completed successfully", hlsManifestKey, conversionTimeSec);
+
+            // Delete the original video file to save storage space (deleteFile handles errors internally)
+            cloudflareR2Service.deleteFile(r2ObjectKey);
 
             log.info("Completed processing of video: {} (Task ID: {})", r2ObjectKey, taskId);
 
@@ -169,13 +174,13 @@ public class VideoProcessingQueue {
      * Update the status of a task
      */
     private void updateTaskStatus(String taskId, String status, String message) {
-        updateTaskStatus(taskId, status, message, null);
+        updateTaskStatus(taskId, status, message, null, 0);
     }
 
     /**
-     * Update the status of a task with HLS manifest key
+     * Update the status of a task with HLS manifest key and conversion time
      */
-    private void updateTaskStatus(String taskId, String status, String message, String hlsManifestKey) {
+    private void updateTaskStatus(String taskId, String status, String message, String hlsManifestKey, long conversionTimeSec) {
         VideoProcessingStatus currentStatus = taskStatusMap.get(taskId);
         if (currentStatus != null) {
             currentStatus.setStatus(status);
@@ -183,6 +188,13 @@ public class VideoProcessingQueue {
             currentStatus.setUpdatedAt(LocalDateTime.now());
             if (hlsManifestKey != null) {
                 currentStatus.setHlsManifestKey(hlsManifestKey);
+            }
+
+            // Update Firebase: set isHLSConverted and hlsConversionTimeSec on the existing video
+            if ("COMPLETED".equals(status)) {
+                firebaseService.updateHlsFields(currentStatus.getR2ObjectKey(), true, conversionTimeSec);
+            } else if ("FAILED".equals(status)) {
+                firebaseService.updateHlsFields(currentStatus.getR2ObjectKey(), false, 0);
             }
         } else {
             log.warn("Attempted to update non-existent task: {}", taskId);

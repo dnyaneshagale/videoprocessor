@@ -95,12 +95,7 @@ public class CloudflareR2Service {
         // Download the file
         try (ResponseInputStream<GetObjectResponse> s3Object = s3Client.getObject(getObjectRequest);
              FileOutputStream outputStream = new FileOutputStream(tempFile)) {
-
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = s3Object.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead);
-            }
+            s3Object.transferTo(outputStream);
         } catch (NoSuchKeyException e) {
             tempFile.delete();
             throw new IllegalArgumentException(

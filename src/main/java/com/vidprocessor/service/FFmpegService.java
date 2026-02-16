@@ -13,7 +13,6 @@ import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -30,17 +29,14 @@ public class FFmpegService {
     private String ffprobePath;
 
     // Video quality profile definitions
-    private static final Map<String, QualityProfile> QUALITY_PROFILES = new HashMap<>();
-
-    static {
-        // Initialize quality profiles (resolution, videoBitrate kbps, audioBitrate kbps, CRF)
-        QUALITY_PROFILES.put("1440p", new QualityProfile(2560, 1440, 14000, 192, 20));
-        QUALITY_PROFILES.put("1080p", new QualityProfile(1920, 1080, 8000, 192, 21));
-        QUALITY_PROFILES.put("720p", new QualityProfile(1280, 720, 5000, 192, 23));
-        QUALITY_PROFILES.put("480p", new QualityProfile(854, 480, 2500, 128, 24));
-        QUALITY_PROFILES.put("360p", new QualityProfile(640, 360, 1200, 128, 25));
-        QUALITY_PROFILES.put("240p", new QualityProfile(426, 240, 700, 96, 26));
-    }
+    private static final Map<String, QualityProfile> QUALITY_PROFILES = Map.of(
+            "1440p", new QualityProfile(2560, 1440, 14000, 192, 20),
+            "1080p", new QualityProfile(1920, 1080, 8000, 192, 21),
+            "720p",  new QualityProfile(1280, 720, 5000, 192, 23),
+            "480p",  new QualityProfile(854, 480, 2500, 128, 24),
+            "360p",  new QualityProfile(640, 360, 1200, 128, 25),
+            "240p",  new QualityProfile(426, 240, 700, 96, 26)
+    );
 
     /**
      * Converts a video file to HLS format with appropriate quality levels

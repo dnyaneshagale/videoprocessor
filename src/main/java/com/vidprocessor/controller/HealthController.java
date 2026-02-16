@@ -6,7 +6,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -18,12 +17,11 @@ public class HealthController {
 
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> health() {
-        Map<String, Object> health = new HashMap<>();
-        health.put("status", "UP");
-        health.put("timestamp", LocalDateTime.now().toString());
-        health.put("service", "video-processor");
-        
-        return ResponseEntity.ok(health);
+        return ResponseEntity.ok(Map.of(
+                "status", "UP",
+                "timestamp", LocalDateTime.now().toString(),
+                "service", "video-processor"
+        ));
     }
 
     @GetMapping("/ping")

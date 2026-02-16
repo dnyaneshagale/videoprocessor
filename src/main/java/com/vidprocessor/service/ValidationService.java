@@ -3,8 +3,6 @@ package com.vidprocessor.service;
 import org.apache.commons.io.FilenameUtils;
 import org.springframework.stereotype.Service;
 import java.util.regex.Pattern;
-import java.util.Arrays;
-import java.util.HashSet;
 import java.util.Set;
 
 @Service
@@ -14,10 +12,10 @@ public class ValidationService {
     private static final Pattern VALID_R2_KEY_PATTERN = Pattern.compile("^[a-zA-Z0-9_\\-\\.\\/@ ]+$");
 
     // Set of supported video format extensions
-    private static final Set<String> SUPPORTED_VIDEO_FORMATS = new HashSet<>(Arrays.asList(
+    private static final Set<String> SUPPORTED_VIDEO_FORMATS = Set.of(
             "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "ts", "mts",
             "m2ts", "mpg", "mpeg", "vob", "ogv", "mxf", "f4v", "asf", "divx"
-    ));
+    );
 
     /**
      * Validates R2 object keys to prevent path traversal and injection attacks

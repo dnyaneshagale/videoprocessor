@@ -10,7 +10,6 @@ import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -33,17 +32,6 @@ public class GlobalExceptionHandler {
         );
     }
 
-    @ExceptionHandler(NullPointerException.class)
-    public ResponseEntity<Map<String, Object>> handleNullPointerException(
-            NullPointerException ex, WebRequest request) {
-        log.error("Null pointer exception occurred", ex);
-        return buildErrorResponse(
-                HttpStatus.INTERNAL_SERVER_ERROR,
-                "Internal Error",
-                "An unexpected error occurred. Please try again later.",
-                request.getDescription(false)
-        );
-    }
 
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<Map<String, Object>> handleRuntimeException(
@@ -98,14 +86,12 @@ public class GlobalExceptionHandler {
             String error,
             String message,
             String path) {
-        
-        Map<String, Object> errorResponse = new HashMap<>();
-        errorResponse.put("timestamp", LocalDateTime.now().toString());
-        errorResponse.put("status", status.value());
-        errorResponse.put("error", error);
-        errorResponse.put("message", message);
-        errorResponse.put("path", path.replace("uri=", ""));
-
-        return new ResponseEntity<>(errorResponse, status);
+        return new ResponseEntity<>(Map.of(
+                "timestamp", LocalDateTime.now().toString(),
+                "status", status.value(),
+                "error", error,
+                "message", message,
+                "path", path.replace("uri=", "")
+        ), status);
     }
 }

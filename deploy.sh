@@ -26,7 +26,7 @@ IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 # Cloud Run instance sizing
 CPU="4"                                 # 4 vCPUs for FFmpeg encoding
 MEMORY="8Gi"                            # 8 GB RAM
-MAX_INSTANCES="10"                      # Max auto-scale instances
+MAX_INSTANCES="5"                       # Max auto-scale instances (quota: 20 vCPU)
 MIN_INSTANCES="0"                       # Scale to zero when idle
 CONCURRENCY="4"                         # Requests per instance (= CPU count)
 TIMEOUT="3600"                          # 60 min max request timeout
@@ -97,7 +97,8 @@ echo "  CLOUDFLARE_R2_ACCESS_KEY=your-access-key,\\"
 echo "  CLOUDFLARE_R2_SECRET_KEY=your-secret-key,\\"
 echo "  CLOUDFLARE_R2_ENDPOINT=https://your-account-id.r2.cloudflarestorage.com,\\"
 echo "  CLOUDFLARE_R2_BUCKET=your-bucket-name,\\"
-echo "  API_KEY=your-api-key-min-32-chars\""
+echo "  API_KEY=your-api-key-min-32-chars,\\"
+echo "  FIREBASE_DATABASE_URL=https://your-project.firebaseio.com\""
 echo ""
 echo "  Or use Secret Manager (recommended for production):"
 echo ""
